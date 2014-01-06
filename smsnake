@@ -1,0 +1,386 @@
+#!/bin/bash
+
+# --------------------------------- Config ------------------------------------
+# You can modify these
+RATIO="2" # proportion of pixels in the viewport. Value 2 is good for 8x16.
+SPEED="2"
+DEFAULT_MAZE="0"
+SNAKE_DEFAULT_LENGTH="4"
+TERM="xterm" # to force color support
+PIXEL_ON="`tput setb 2`"
+PIXEL_FOOD="`tput setb 4`"
+PIXEL_MAZE="`tput setb 7`"
+PIXEL_OFF="`tput setb 9`"
+COLOR_HEADER="`tput setb 0`"
+COLOR_FOOTER="`tput setb 9`"
+COLOR_RESET="`tput sgr0`"
+COLOR_MESSAGE="`tput setb 0`"
+KEY_U="`echo -en '\e[A'`" # keys for changing direction
+KEY_D="`echo -en '\e[B'`"
+KEY_R="`echo -en '\e[C'`"
+KEY_L="`echo -en '\e[D'`"
+VERSION="v1.0.3"
+
+# ----------------------------- Initialization --------------------------------
+# Do not modify these since they are doing magic
+declare -a SNAKE_X SNAKE_Y
+WIDTH=`tput cols`
+HEIGHT=`tput lines`
+PORT_X=$((WIDTH/RATIO))
+PORT_Y=$((HEIGHT-2))
+PIXEL_TEXT=`for a in $(seq 1 $RATIO); do echo -n '.'; done`
+GAME_STATUS="false"
+if ! [ -e ~/.smsnake/score ]; then
+	mkdir ~/.smsnake; echo 0 > ~/.smsnake/score
+fi
+HIGHSCORE="`cat ~/.smsnake/score`"
+SCORE="0"
+PAUSE="false"
+
+snake_init() {
+	#xset -r 111; xset -r 113; xset -r 114; xset -r 116
+	setterm -repeat off
+	tput reset
+	tput civis
+	stty -echo -icanon time 0 min 0
+}
+
+snake_finalize() {
+	#xset r 111; xset r 113; xset r 114; xset r 116
+	setterm -repeat on
+	tput reset
+	stty sane
+	kill 0; exit 0
+}
+
+snake_init
+trap "snake_finalize" SIGINT SIGTERM EXIT
+
+# -------------------------------- Routines -----------------------------------
+cup() {	Y=$1; X=$2; echo -en "\e[$((Y+1));$((X+1))H"; }
+
+pixelput() {
+	X=$1; Y=$2
+	echo -en "\e[$((Y+2));$((X*RATIO+1))H" # (no cup = faster output)
+	case $3 in
+		'on')   echo -n $PIXEL_ON ;;
+		'off')  echo -n $PIXEL_OFF ;;
+		'food') echo -n $PIXEL_FOOD ;;
+		'maze') echo -n $PIXEL_MAZE ;;
+	esac
+	echo -n "  "
+}
+
+# ------------------------------ Snake Engine ---------------------------------
+start_game() {
+	SNAKE_LEN="$SNAKE_DEFAULT_LENGTH"
+	SNAKE_COLLISION_MAP=`seq 4 $SNAKE_LEN`
+	GAME_STATUS="true"
+	SCORE="0"
+	PAUSE="false"
+	TRON_MODE="false"
+	ui_drawheader
+	generate_food
+	create_snake
+	ui_clearport
+	redraw_maze
+}
+
+pause_game() {
+	case $PAUSE in
+		'false') PAUSE="true"; ui_drawmessage "Paused"
+		         ui_drawheader "[ Pause ON ]" ;;
+		'true')  PAUSE="false"; ui_clearport
+		         ui_drawheader; redraw_maze ;;
+	esac
+}
+
+game_over() {
+	GAME_STATUS="false"
+	echo $HIGHSCORE > ~/.smsnake/score
+	ui_drawmessage "Game Over"
+}
+
+update_speed() {
+	case $SPEED in
+		'1') SLEEP_TIME="0.2" ;;
+		'2') SLEEP_TIME="0.1" ;;
+		'3') SLEEP_TIME="0.05" ;;
+		'4') SLEEP_TIME="0.02" ;;
+		'5') SLEEP_TIME="0.008" ;;
+	esac
+}
+
+create_snake() {
+	for i in `seq $SNAKE_LEN -1 1`; do
+		SNAKE_X[$i]="$((2+SNAKE_LEN-i))"
+		SNAKE_Y[$i]="2"
+	done
+	SNAKE_DIR="right"
+	SNAKE_MVMNT="hr"
+}
+
+print_snake() {
+	pixelput ${SNAKE_X[1]} ${SNAKE_Y[1]} on
+}
+
+redraw_snake() {
+	if $GAME_STATUS; then for i in `seq 1 $SNAKE_LEN`; do
+		pixelput $((SNAKE_X[i])) $((SNAKE_Y[i])) on
+	done; fi
+}
+
+redraw_maze() {
+	if $GAME_STATUS; then
+		for i in `seq 1 $PORT_X`; do for j in `seq 1 $PORT_Y`; do
+			if [ $((MAZE[i*PORT_X+j])) -eq 1 ]; then pixelput $((i-1)) $((j-1)) maze; fi;
+		done; done
+	fi
+}
+
+print_food() {
+	pixelput $FOOD_X $FOOD_Y food
+}
+
+generate_food() {
+	while true; do
+		FOOD_X=$((RANDOM % PORT_X))
+		FOOD_Y=$((RANDOM % PORT_Y))
+		if [ $((MAZE[(FOOD_X+1)*PORT_X+FOOD_Y+1])) -ne 1 ]; then
+			TEMP_RETURN_FOOD="true"
+			for i in 1 2 3 $SNAKE_COLLISION_MAP; do
+				[ "${SNAKE_X[i]}" = "$FOOD_X" ] &&
+				[ "${SNAKE_Y[i]}" = "$FOOD_Y" ] &&
+				TEMP_RETURN_FOOD="false"
+			done
+			if $TEMP_RETURN_FOOD; then return 0; fi
+		fi
+	done
+}
+
+generate_maze() {
+	ui_drawmessage "Generating maze..."
+	for i in `seq 1 $PORT_X`; do for j in `seq 1 $PORT_Y`; do
+		MAZE[$((i*PORT_X+j))]="0"
+	done; done
+	drawarea() { # <x0> <y0> <x> <y> <1/0>
+		for i in `seq $1 $3`; do for j in `seq $2 $4`; do
+		MAZE[$((i*PORT_X+j))]=$5; done; done
+	}
+	drawrect() { # <x0> <y0> <x> <y> <1/0>
+		drawarea $1 $2 $3 $2 $5
+		drawarea $1 $2 $1 $4 $5
+		drawarea $3 $2 $3 $4 $5
+		drawarea $1 $4 $3 $4 $5
+	}
+	case $DEFAULT_MAZE in
+		'1') drawrect 1 1 $PORT_X $PORT_Y 1 ;;
+		'2') for i in `seq 1 $PORT_X`; do for j in `seq 1 $PORT_Y`; do
+		     MAZE[$((i*PORT_X+j))]=$(((i+j)%PORT_Y/2)); done; done ;;
+		'3') drawrect $((PORT_X/4)) $((PORT_Y/3)) $((3*PORT_X/4)) $((2*PORT_Y/3)) 1
+		     drawrect 1 1 $PORT_X $PORT_Y 1
+		     drawrect $((PORT_X/4)) 1 $((3*PORT_X/4)) $PORT_Y 0
+		     drawarea $((PORT_X/2)) 1 $((PORT_X/2)) $PORT_Y 1
+		     drawarea 2 $((PORT_Y/3+1)) $((PORT_X-1)) $((2*PORT_Y/3-1)) 0 ;;
+	esac
+}
+
+toogle_maze() {
+	case $DEFAULT_MAZE in
+		'0') DEFAULT_MAZE=1; generate_maze ;;
+		'1') DEFAULT_MAZE=2; generate_maze ;;
+		'2') DEFAULT_MAZE=3; generate_maze ;;
+		'3') DEFAULT_MAZE=0; generate_maze ;;
+	esac
+}
+	
+
+move_snake() {
+	pixelput $((SNAKE_X[SNAKE_LEN])) $((SNAKE_Y[SNAKE_LEN])) off
+
+	unset SNAKE_X[$SNAKE_LEN] SNAKE_Y[$SNAKE_LEN]
+	SNAKE_X=( 0 0 ${SNAKE_X[@]} )
+	SNAKE_Y=( 0 0 ${SNAKE_Y[@]} )
+	unset SNAKE_X[0] SNAKE_Y[0]
+	
+	case "$SNAKE_DIR" in
+		'left')  SNAKE_X[1]=$((SNAKE_X[2]-1)) ;
+		         SNAKE_Y[1]=$((SNAKE_Y[2])) ;;
+		'right') SNAKE_X[1]=$((SNAKE_X[2]+1)) ;
+		         SNAKE_Y[1]=$((SNAKE_Y[2])) ;;
+		'up')    SNAKE_X[1]=$((SNAKE_X[2])) ;
+		         SNAKE_Y[1]=$((SNAKE_Y[2]-1)) ;;
+		'down')  SNAKE_X[1]=$((SNAKE_X[2])) ;
+		         SNAKE_Y[1]=$((SNAKE_Y[2]+1)) ;;
+	esac
+}
+
+check_collisions() {
+	CX=$((SNAKE_X[1]));	CY=$((SNAKE_Y[1]))
+	# ----- Collision with viewport border -----
+	if   [ "$CX" -ge $PORT_X ]; then SNAKE_X[1]=0
+	elif [ "$CY" -ge $PORT_Y ]; then SNAKE_Y[1]=0
+	elif [ "$CX" -lt 0 ]; then SNAKE_X[1]=$((PORT_X-1))
+	elif [ "$CY" -lt 0 ]; then SNAKE_Y[1]=$((PORT_Y-1))
+	fi
+	# ----- Collision with tail -----
+	for i in $SNAKE_COLLISION_MAP; do # ignoring first 3 pixels of snake
+		if [ "$CX" = "$((SNAKE_X[i]))" ] &&
+		   [ "$CY" = "$((SNAKE_Y[i]))" ]; then game_over; fi
+	done
+	# ----- Collision with food -----
+	if [ "$CX" -eq "$FOOD_X" ] && [ "$CY" -eq "$FOOD_Y" ]; then
+		pixelput $FOOD_X $FOOD_Y on
+		SCORE=$((SCORE+SPEED*2))
+		if [ $HIGHSCORE -lt $SCORE ]; then HIGHSCORE=$SCORE; fi
+		ui_drawheader
+		generate_food
+		SNAKE_LEN=$((SNAKE_LEN+1))
+		SNAKE_COLLISION_MAP=`seq 4 $SNAKE_LEN`
+		SNAKE_X[SNAKE_LEN]=SNAKE_X[$((SNAKE_LEN-1))]
+		SNAKE_Y[SNAKE_LEN]=SNAKE_Y[$((SNAKE_LEN-1))]
+	fi
+	# ----- Tron mode -----
+	if $TRON_MODE; then
+		SNAKE_LEN=$((SNAKE_LEN+1))
+		SNAKE_COLLISION_MAP=`seq 4 $SNAKE_LEN`
+		SNAKE_X[$SNAKE_LEN]=SNAKE_X[$((SNAKE_LEN-1))]
+		SNAKE_Y[$SNAKE_LEN]=SNAKE_Y[$((SNAKE_LEN-1))]
+	fi
+	# ----- Collision with maze -----
+	if [ $((MAZE[(CX+1)*PORT_X+(CY+1)])) -eq 1 ]; then game_over; fi
+}
+
+# ----------------------------- User Interface --------------------------------
+ui_drawheader() { # <string>
+	echo -n $COLOR_HEADER
+	cup 0 0; tput el; cup 0 1
+	tput bold
+	echo -en " [SmSnake $VERSION]  |  Score: $SCORE ($HIGHSCORE)  | "
+	echo -en " Maze: $DEFAULT_MAZE  |  Speed: $SPEED  |"
+	if [ $# -gt 0 ]; then echo -en "  $*"; fi
+	echo -n $COLOR_RESET
+}
+
+ui_drawfooter() {
+	btn() { tput rev; echo -n " $1 "; tput sgr0; shift; echo -n " $*   "; }
+	echo -n $COLOR_FOOTER
+	cup $HEIGHT 0; tput el; cup $HEIGHT 1
+	btn "N" "New Game"
+	btn "P" "Pause"
+	btn "M" "Mazes"
+	btn "1-5" "Speed"
+	btn "H" "Help"
+	btn "Q" "Quit"
+	echo -n $COLOR_RESET
+}
+
+ui_drawmessage() { # <string(s)>
+	echo -n $COLOR_MESSAGE
+	N=$#
+	LENGTH=`echo "$(for p in "$@"; do echo ${p}; done)" | wc -L`
+	POS_Y=$((PORT_Y/2-N/2))
+	POS_X=$((WIDTH/2-(LENGTH+8)/2))
+	draw_border() {
+		I=$1; cup $((POS_Y+I)) $POS_X
+		for i in `seq 1 $((LENGTH+6))`; do echo -en " "; done
+	}
+	draw_message() {
+		I=$1; cup $((POS_Y+I)) $POS_X; shift
+		echo -n "   $*"
+	}
+	for a in `seq 0 $((N+1))`; do draw_border $a; done
+	for a in `seq 1 $N`; do draw_message $a $1; shift; done
+	echo -n $COLOR_RESET
+}
+
+debug_time_start() {
+	D1=$(date +%s.%N)
+}
+
+debug_time_end() {
+	D2=$(date +%s.%N)
+}
+
+debug_time_show() { # <symbol>
+	DIFF=$(echo "$D2 - $D1 - 0.002" | bc)
+	echo -n $COLOR_MESSAGE
+	cup 2 80
+	echo $DIFF
+}
+
+ui_clearport() {
+	echo -n $COLOR_RESET
+	cup 1 0
+	for i in `seq 1 $PORT_Y`; do tput el; echo; done
+	redraw_snake
+}
+
+ui_drawhelp() {
+	PAUSE="true"
+	ui_drawheader "[ Pause ON ]"
+	ui_drawmessage \
+	"Press N to start the game (and Q to quit)." \
+	"Use arrows to control the snake." \
+	"-------------------------------------------------------" \
+	"Objective of this game is to earn score by eating food." \
+	"Food also adds length to the snake. If you get run into" \
+	"yourself, or crash the wall - the game is over." \
+	"You can change the speed with 1-5 buttons. The higher" \
+	"the speed, the more points you gain." \
+	"-------------------------------------------------------" \
+	"Author: Style Mistake" \
+	"Check more at http://stylemistake.com"
+}
+
+# ---------------------------------- Main -------------------------------------
+
+if [ $WIDTH -lt 80 ] || [ $HEIGHT -lt 20 ]; then
+	ui_drawmessage \
+	"Your terminal should" \
+	"be at least 80x20 :(" \
+	"Current: $((WIDTH))x$((HEIGHT))"
+	sleep 3; exit 1
+fi
+
+update_speed
+ui_drawfooter
+ui_drawheader
+
+while true; do
+	CH="`dd bs=3 count=1 2>/dev/null`"
+
+	case $CH in
+		# ----- Soft buttons -----
+		'n') start_game ;;
+		'q') exit 0 ;;
+		'h') ui_drawhelp ;;
+		'p') pause_game ;;
+		'1') SPEED='1'; update_speed ;;
+		'2') SPEED='2'; update_speed ;;
+		'3') SPEED='3'; update_speed ;;
+		'4') SPEED='4'; update_speed ;;
+		'5') SPEED='5'; update_speed ;;
+		'm') toogle_maze; start_game ;;
+		't') if $TRON_MODE; then TRON_MODE="false"; else TRON_MODE="true"; fi ;;
+		# ----- Direction buttons -----
+		"$KEY_U") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="up"; SNAKE_MVMNT="vt"; fi ;;
+		"$KEY_D") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="down"; SNAKE_MVMNT="vt"; fi ;;
+		"$KEY_L") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="left"; SNAKE_MVMNT="hr"; fi ;;
+		"$KEY_R") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="right"; SNAKE_MVMNT="hr"; fi ;;
+	esac
+
+	#debug_time_start
+	if $GAME_STATUS && ! $PAUSE; then
+		move_snake
+		check_collisions
+		if ! $GAME_STATUS; then continue; fi
+		print_snake
+		print_food
+	fi
+	#debug_time_end
+	
+	#debug_time_show
+	sleep $SLEEP_TIME
+done
+
