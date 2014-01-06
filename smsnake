@@ -1,4 +1,48 @@
-#!/bin/bash
+#!/bin/bash -i
+
+# ------------------------------- Workarounds ---------------------------------
+
+# Detect terminal size from user input
+if [ "$COLUMNS" = "" ] || [ "$LINES" = "" ] && ! [ -e "/usr/bin/tput" ]; then
+	echo "Your terminal is assumed to be 80x24"
+	echo -n "Change values? (y/N) " && read a
+	if [ "$a" = "y" ]; then
+		echo -n "width [80]:"  && read COLUMNS
+		echo -n "height [24]: " && read LINES
+	fi
+	if [ "$COLUMNS" == "" ] || ! [[ "$COLUMNS" =~ ^[0-9]+$ ]]; then COLUMNS=80; fi
+	if [ "$LINES" == ""   ] || ! [[ "$LINES"   =~ ^[0-9]+$ ]]; then LINES=24; fi
+fi
+
+tput() { # <param>
+	if [ -e "/usr/bin/tput" ]; then /usr/bin/tput $*; return 0; fi
+	case "$1" in
+		'cols')  echo $COLUMNS ;;
+		'lines') echo $LINES ;;
+		'setb')
+			[ "$2" -eq 0 ] && echo -en "\e[40m"
+			[ "$2" -eq 2 ] && echo -en "\e[42m"
+			[ "$2" -eq 4 ] && echo -en "\e[41m"
+			[ "$2" -eq 7 ] && echo -en "\e[47m"
+			[ "$2" -eq 9 ] && echo -en "\e[49m"
+		;;
+		'sgr0')  echo -en "\e(B\e[m" ;;
+		'civis') echo -en "\e[?25l" ;;
+		'reset')
+			echo -en "\ec\e[!p\e[?3;4l\e[4l\e>"
+		;;
+		'el')    echo -en "\e[K" ;;
+		'bold')  echo -en "\e[1m" ;;
+		'rev')   echo -en "\e[7m" ;;
+	esac
+}
+
+seq() {
+	if [ -e "/usr/bin/seq" ]; then /usr/bin/seq $*; return 0; fi
+	[ "$#" -eq 3 ] && eval echo {${1}..${3}..${2}} || eval echo {${1}..${2}}
+}
+
+cup() {	Y=$1; X=$2; echo -en "\e[$((Y+1));$((X+1))H"; }
 
 # --------------------------------- Config ------------------------------------
 # You can modify these
@@ -19,13 +63,15 @@ KEY_U="`echo -en '\e[A'`" # keys for changing direction
 KEY_D="`echo -en '\e[B'`"
 KEY_R="`echo -en '\e[C'`"
 KEY_L="`echo -en '\e[D'`"
-VERSION="v1.0.3"
+VERSION="v1.0.4"
 
 # ----------------------------- Initialization --------------------------------
 # Do not modify these since they are doing magic
 declare -a SNAKE_X SNAKE_Y
+
 WIDTH=`tput cols`
 HEIGHT=`tput lines`
+
 PORT_X=$((WIDTH/RATIO))
 PORT_Y=$((HEIGHT-2))
 PIXEL_TEXT=`for a in $(seq 1 $RATIO); do echo -n '.'; done`
@@ -33,13 +79,16 @@ GAME_STATUS="false"
 if ! [ -e ~/.smsnake/score ]; then
 	mkdir ~/.smsnake; echo 0 > ~/.smsnake/score
 fi
+PIPE="$HOME/.smsnake/pipe"
 HIGHSCORE="`cat ~/.smsnake/score`"
 SCORE="0"
 PAUSE="false"
 
+[ -e "/proc" ] && IS_TTY=true || IS_TTY=false
+
 snake_init() {
 	#xset -r 111; xset -r 113; xset -r 114; xset -r 116
-	setterm -repeat off
+	[ -e "/usr/bin/setterm" ] && setterm -repeat off
 	tput reset
 	tput civis
 	stty -echo -icanon time 0 min 0
@@ -47,7 +96,7 @@ snake_init() {
 
 snake_finalize() {
 	#xset r 111; xset r 113; xset r 114; xset r 116
-	setterm -repeat on
+	[ -e "/usr/bin/setterm" ] && setterm -repeat on
 	tput reset
 	stty sane
 	kill 0; exit 0
@@ -57,8 +106,6 @@ snake_init
 trap "snake_finalize" SIGINT SIGTERM EXIT
 
 # -------------------------------- Routines -----------------------------------
-cup() {	Y=$1; X=$2; echo -en "\e[$((Y+1));$((X+1))H"; }
-
 pixelput() {
 	X=$1; Y=$2
 	echo -en "\e[$((Y+2));$((X*RATIO+1))H" # (no cup = faster output)
@@ -218,10 +265,10 @@ move_snake() {
 check_collisions() {
 	CX=$((SNAKE_X[1]));	CY=$((SNAKE_Y[1]))
 	# ----- Collision with viewport border -----
-	if   [ "$CX" -ge $PORT_X ]; then SNAKE_X[1]=0
-	elif [ "$CY" -ge $PORT_Y ]; then SNAKE_Y[1]=0
-	elif [ "$CX" -lt 0 ]; then SNAKE_X[1]=$((PORT_X-1))
-	elif [ "$CY" -lt 0 ]; then SNAKE_Y[1]=$((PORT_Y-1))
+	if   [ "$CX" -ge "$PORT_X" ]; then SNAKE_X[1]=0
+	elif [ "$CY" -ge "$PORT_Y" ]; then SNAKE_Y[1]=0
+	elif [ "$CX" -lt "0" ]; then SNAKE_X[1]=$((PORT_X-1))
+	elif [ "$CY" -lt "0" ]; then SNAKE_Y[1]=$((PORT_Y-1))
 	fi
 	# ----- Collision with tail -----
 	for i in $SNAKE_COLLISION_MAP; do # ignoring first 3 pixels of snake
@@ -347,40 +394,54 @@ update_speed
 ui_drawfooter
 ui_drawheader
 
-while true; do
-	CH="`dd bs=3 count=1 2>/dev/null`"
+game_loop() {
+	while true; do
+		CH="`cat $PIPE`" && echo -n > $PIPE
+		case $CH in
+			# ----- Soft buttons -----
+			'n') start_game ;;
+			'q') exit 0 ;;
+			'h') ui_drawhelp ;;
+			'p') pause_game ;;
+			'1') SPEED='1'; update_speed ;;
+			'2') SPEED='2'; update_speed ;;
+			'3') SPEED='3'; update_speed ;;
+			'4') SPEED='4'; update_speed ;;
+			'5') SPEED='5'; update_speed ;;
+			'm') toogle_maze; start_game ;;
+			't') if $TRON_MODE; then TRON_MODE="false"; else TRON_MODE="true"; fi ;;
+			# ----- Direction buttons -----
+			"$KEY_U") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="up"; SNAKE_MVMNT="vt"; fi ;;
+			"$KEY_D") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="down"; SNAKE_MVMNT="vt"; fi ;;
+			"$KEY_L") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="left"; SNAKE_MVMNT="hr"; fi ;;
+			"$KEY_R") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="right"; SNAKE_MVMNT="hr"; fi ;;
+		esac
 
-	case $CH in
-		# ----- Soft buttons -----
-		'n') start_game ;;
-		'q') exit 0 ;;
-		'h') ui_drawhelp ;;
-		'p') pause_game ;;
-		'1') SPEED='1'; update_speed ;;
-		'2') SPEED='2'; update_speed ;;
-		'3') SPEED='3'; update_speed ;;
-		'4') SPEED='4'; update_speed ;;
-		'5') SPEED='5'; update_speed ;;
-		'm') toogle_maze; start_game ;;
-		't') if $TRON_MODE; then TRON_MODE="false"; else TRON_MODE="true"; fi ;;
-		# ----- Direction buttons -----
-		"$KEY_U") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="up"; SNAKE_MVMNT="vt"; fi ;;
-		"$KEY_D") if [ "$SNAKE_MVMNT" = "hr" ]; then SNAKE_DIR="down"; SNAKE_MVMNT="vt"; fi ;;
-		"$KEY_L") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="left"; SNAKE_MVMNT="hr"; fi ;;
-		"$KEY_R") if [ "$SNAKE_MVMNT" = "vt" ]; then SNAKE_DIR="right"; SNAKE_MVMNT="hr"; fi ;;
-	esac
+		#debug_time_start
+		if $GAME_STATUS && ! $PAUSE; then
+			move_snake
+			check_collisions
+			if ! $GAME_STATUS; then continue; fi
+			print_snake
+			print_food
+		fi
+		#debug_time_end
+		
+		#debug_time_show
 
-	#debug_time_start
-	if $GAME_STATUS && ! $PAUSE; then
-		move_snake
-		check_collisions
-		if ! $GAME_STATUS; then continue; fi
-		print_snake
-		print_food
-	fi
-	#debug_time_end
-	
-	#debug_time_show
-	sleep $SLEEP_TIME
-done
+		sleep $SLEEP_TIME
+	done
+}
 
+game_input() {
+	while true; do
+		CH="`dd bs=3 count=1 2>/dev/null`"
+		[ "$CH" = "" ] || echo "$CH" > $PIPE
+		[ "$CH" = "q" ] && exit 0
+		sleep 0.01
+	done
+}
+
+echo -n > $PIPE
+game_loop &
+game_input
